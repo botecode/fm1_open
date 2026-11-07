@@ -1045,7 +1045,7 @@ static void radio_line(unsigned slot, unsigned y, const char *value, uint16_t co
     paint_fill(8, y, 224, 7, BACK);
     text(8, y, value, 1, color, BACK);
 }
-static __attribute__((noinline)) void draw_ble(const struct fm1_ble_status *status)
+static __attribute__((noinline, minsize)) void draw_ble(const struct fm1_ble_status *status)
 {
     static const char *const states[] = {"OFF", "IDLE", "WAITING FOR DEVICE",
         "SCANNING", "CONNECTING", "FINDING MIDI", "CONNECTED", "MIDI READY", "DISCONNECTING"};
@@ -1330,7 +1330,7 @@ static void leds(const struct groove_view *v, unsigned visible)
         if (changed & (1U << key)) fm1_led_set(key, (bits >> key) & 1U);
     button_led_cache = (uint16_t)bits;
 }
-static __attribute__((noinline)) void edit_page_draw(unsigned visible)
+static __attribute__((noinline, minsize)) void edit_page_draw(unsigned visible)
 {
     if (paint_rendering && paint_top + PAINT_ROWS <= 32) return;
     if (!paint_rendering) {
@@ -1444,7 +1444,7 @@ static __attribute__((noinline, cold, minsize)) void boot_draw(void)
         paint_fill(58 + 16 * i, 166 - height[i] / 2, 12, height[i],
                    i < boot_phase ? colors[i] : PANEL);
 }
-static void draw_page_body(const struct fm1_ble_status *ble)
+static __attribute__((minsize)) void draw_page_body(const struct fm1_ble_status *ble)
 {
     unsigned visible = boot_active ? STARTUP : glo_down && glo_used ? MIX : page;
     if (visible != cache->shown_page) {
@@ -1951,7 +1951,7 @@ void groove_screen_tap(uint32_t now)
     notice = bpm < 0 ? "TAP: EXTERNAL MIDI CLOCK" : bpm ? "TAP TEMPO APPLIED" : "TAP AGAIN / HOME+SEQ";
     notice_until = now + 1500U;
 }
-static int apply_controls(const struct fm1_controls *controls, uint32_t now,
+static __attribute__((minsize)) int apply_controls(const struct fm1_controls *controls, uint32_t now,
                           const struct fm1_ble_status *ble)
 {
     uint32_t pressed = controls->buttons & ~previous_buttons;

@@ -13,6 +13,8 @@ jobs:
       FM1_SOURCE_URL: https://github.com/${{ github.repository }}/archive/${{ github.sha }}.zip
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # size report compares against upstream 4c7496d
 
       - name: Cache WASI SDK (simulator compiler)
         uses: actions/cache@v4
