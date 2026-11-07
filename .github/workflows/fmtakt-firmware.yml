@@ -61,10 +61,15 @@ jobs:
             & $nm --print-size --size-sort --radix=d build\dx7\sdk.elf | Select-Object -Last 80
             Copy-Item build\dx7\sdk.elf fmtakt-sdk.elf
           }
-          "== stock upstream screen.c (4c7496d) =="
-          git show 4c7496d:app/screen.c | Set-Content -NoNewline -Encoding utf8NoBOM app\screen.c
-          cmd /c "powershell -NoProfile -ExecutionPolicy Bypass -File sdk\Build.ps1 -FirmwareOnly 2>&1" | Select-String 'app image|fit|Offline package'
-          if (Test-Path build\dx7\sdk.elf) { & $nm --print-size --size-sort --radix=d build\dx7\sdk.elf | Select-Object -Last 80 | Set-Content stock-symbols.txt }
+
+      - name: Stock size (upstream screen.c 4c7496d, for comparison)
+        if: always()
+        continue-on-error: true
+        shell: cmd
+        run: |
+          git show 4c7496d:app/screen.c > app\screen.c
+          powershell -NoProfile -ExecutionPolicy Bypass -File sdk\Build.ps1 -FirmwareOnly
+          copy build\dx7\sdk.elf stock-sdk.elf
           git checkout -- app/screen.c
 
       - uses: actions/upload-artifact@v4
@@ -73,7 +78,7 @@ jobs:
           name: size-report-${{ github.sha }}
           path: |
             fmtakt-sdk.elf
-            stock-symbols.txt
+            stock-sdk.elf
             build/dx7/firmware-report.json
 
       - uses: actions/upload-artifact@v4
