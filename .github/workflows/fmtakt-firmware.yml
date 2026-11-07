@@ -49,6 +49,31 @@ jobs:
         shell: cmd  # build.bat starts Windows PowerShell 5.1; from pwsh it inherits a broken PSModulePath
         run: .\build.bat --package
 
+      - name: Size report (largest symbols, mod vs stock)
+        if: always()
+        shell: pwsh
+        run: |
+          $nm = 'C:\JL\pi32\bin\llvm-nm.exe'
+          if (Test-Path build\dx7\sdk.elf) {
+            "== fmtakt: 80 largest symbols =="
+            & $nm --print-size --size-sort --radix=d build\dx7\sdk.elf | Select-Object -Last 80
+            Copy-Item build\dx7\sdk.elf fmtakt-sdk.elf
+          }
+          "== stock upstream screen.c (4c7496d) =="
+          git show 4c7496d:app/screen.c | Set-Content -NoNewline -Encoding utf8NoBOM app\screen.c
+          cmd /c "powershell -NoProfile -ExecutionPolicy Bypass -File sdk\Build.ps1 -FirmwareOnly 2>&1" | Select-String 'app image|fit|Offline package'
+          if (Test-Path build\dx7\sdk.elf) { & $nm --print-size --size-sort --radix=d build\dx7\sdk.elf | Select-Object -Last 80 | Set-Content stock-symbols.txt }
+          git checkout -- app/screen.c
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: size-report-${{ github.sha }}
+          path: |
+            fmtakt-sdk.elf
+            stock-symbols.txt
+            build/dx7/firmware-report.json
+
       - uses: actions/upload-artifact@v4
         with:
           name: fmtakt-firmware-${{ github.sha }}
