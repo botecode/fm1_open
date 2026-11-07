@@ -8,6 +8,9 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 60
+    env:
+      FM1_PI32_TOOLCHAIN: C:\JL\pi32
+      FM1_SOURCE_URL: https://github.com/${{ github.repository }}/archive/${{ github.sha }}.zip
     steps:
       - uses: actions/checkout@v4
 
@@ -22,11 +25,8 @@ jobs:
         run: |
           curl.exe --fail --location --retry 3 --output jl.exe https://jl-update.oss-cn-shenzhen.aliyuncs.com/2.5.3.exe
           "installer sha256: " + (Get-FileHash jl.exe -Algorithm SHA256).Hash
-          # Inno Setup installer: try a silent install, fall back to unpacking it.
-          $p = Start-Process .\jl.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/DIR=C:\JL' -PassThru
-          if (!$p.WaitForExit(600000)) { $p.Kill(); "silent install timed out" }
+          # Inno Setup installer; its silent mode hangs on the runner, so unpack it instead.
           if (!(Test-Path C:\JL\pi32\bin\clang.exe)) {
-            "silent install did not produce C:\JL\pi32 - unpacking with innoextract"
             choco install innoextract -y --no-progress
             innoextract --silent --extract --output-dir jlx jl.exe
             $clang = Get-ChildItem jlx -Recurse -Filter clang.exe | Where-Object { $_.Directory.Name -eq 'bin' -and $_.Directory.Parent.Name -eq 'pi32' } | Select-Object -First 1
@@ -47,9 +47,6 @@ jobs:
 
       - name: Build firmware + workbench
         shell: pwsh
-        env:
-          FM1_PI32_TOOLCHAIN: C:\JL\pi32
-          FM1_SOURCE_URL: https://github.com/${{ github.repository }}/archive/${{ github.sha }}.zip
         run: .\build.bat --package
 
       - uses: actions/upload-artifact@v4
