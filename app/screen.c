@@ -882,38 +882,22 @@ static unsigned macro_lock(unsigned slot, unsigned *limit) /* 255 = not lockable
     }
     return lock < groove_lock_parameter_count(track) && *limit ? lock : 255U;
 }
-static unsigned lock_count(void)
-{
-    unsigned n = 0;
-    for (unsigned t = 0; t < 8; ++t)
-        for (unsigned s = 0; s < 64; ++s) n += groove_step_setting(t, s, 5) != 0;
-    return n;
-}
-static void lock_notice(const char *prefix, uint32_t now)
-{
-    unsigned n = lock_count();
-    strcpy(length_notice, prefix);
-    strcat(length_notice, " LOCKS ");
-    char count[4]; decimal(count, n, 1); strcat(length_notice, count); strcat(length_notice, "/16");
-    notice = length_notice; notice_until = now + 1500U;
-}
+/* Current macro value: frame_patch holds the home part's tone (or the DX7 patch) on home pages. */
+static unsigned macro_value(unsigned m) { return m >= 256U ? frame_patch[m - 256U] : m < 255U ? frame_patch[m] : 0; }
 static void macro_lock_edit(unsigned slot, unsigned step, int delta, uint32_t now)
 {
     unsigned limit, lock = macro_lock(slot, &limit), have = groove_step_setting(track, step, 5);
-    if (lock == 255U) { notice = groove_source_type(track) == GROOVE_808 ? "808 LOCKS: VOLUME ONLY" : "THIS KNOB CAN'T LOCK"; notice_until = now + 1500U; return; }
-    unsigned base;
-    if (have == lock + 1U) base = (groove_step_setting(track, step, 6) * limit + 63U) / 127U;
-    else {
-        if (!have && lock_count() >= GROOVE_LOCKS) { notice = "LOCKS FULL 16/16"; notice_until = now + 2000U; return; }
-        if (lock == 135U) { struct groove_fm_controls c; uint8_t patch[156]; groove_fm_copy(track, patch, &c); base = patch[135]; }
-        else { uint8_t tone[GROOVE_TONE_PARAMS]; groove_tone_copy(track, home_part(), tone); base = tone[home_macro(slot)]; }
-        if (groove_step_setting_edit(track, step, 5, (int)(lock + 1U) - (int)have)) { notice = "LOCKS FULL 16/16"; notice_until = now + 2000U; return; }
+    notice_until = now + 1500U;
+    if (lock == 255U) { notice = "NO LOCK FOR THIS KNOB"; return; }
+    unsigned base = (groove_step_setting(track, step, 6) * limit + 63U) / 127U;
+    if (have != lock + 1U) {
+        base = macro_value(home_macro(slot));
+        if (groove_step_setting_edit(track, step, 5, (int)(lock + 1U) - (int)have)) { notice = "LOCKS FULL 16/16"; return; }
     }
     unsigned target = (unsigned)clamp((int)base + delta, 0, (int)limit), value = 0;
     while (value < 127U && (value * limit + 63U) / 127U < target) ++value;
-    int change = (int)value - (int)groove_step_setting(track, step, 6);
-    if (change) groove_step_setting_edit(track, step, 6, change);
-    lock_notice(have && have != lock + 1U ? "REPLACED" : "LOCKED", now);
+    groove_step_setting_edit(track, step, 6, (int)value - (int)groove_step_setting(track, step, 6));
+    notice = have && have != lock + 1U ? "LOCK REPLACED" : "LOCKED";
 }
 static void lock_knob(unsigned col)
 {
@@ -922,8 +906,7 @@ static void lock_knob(unsigned col)
     const char *label = m >= 256U ? "FDBACK" : p ? p->name : "";
     char value[12], shown[12];
     unsigned locked = lock < 255U && groove_step_setting(track, cursor, 5) == lock + 1U;
-    unsigned raw = locked ? (groove_step_setting(track, cursor, 6) * limit + 63U) / 127U
-                          : m >= 256U ? frame_patch[m - 256U] : m < 255U ? frame_patch[m] : 0;
+    unsigned raw = locked ? (groove_step_setting(track, cursor, 6) * limit + 63U) / 127U : macro_value(m);
     if (lock == 255U) strcpy(shown, m < 255U || m >= 256U ? "NO LOCK" : "");
     else if (p) tone_label(m, raw, p, shown);
     else decimal(shown, raw, 1);
@@ -2074,11 +2057,9 @@ static int apply_controls(const struct fm1_controls *controls, uint32_t now,
         groove_sequence_length_set(track, length >= 64U ? 16U : length + 16U);
         unsigned now_length = groove_sequence_length(track);
         cursor %= now_length;
-        strcpy(length_notice, "TRACK ");
-        decimal(length_notice + 6, track + 1U, 1);
-        strcat(length_notice, now_length == length ? " LENGTH LOCKED" : " LENGTH ");
-        if (now_length != length) decimal(length_notice + strlen(length_notice), now_length, 1);
-        notice = length_notice; notice_until = now + 1500U;
+        strcpy(length_notice, "LENGTH ");
+        decimal(length_notice + 7, now_length, 1);
+        notice = now_length == length ? "LENGTH LOCKED" : length_notice; notice_until = now + 1500U;
         goto controls_done;
     }
     if ((pressed & (BUTTON(FX) | BUTTON(ENV) | BUTTON(LFO) | BUTTON(EDIT))) && home_view(page)) {
