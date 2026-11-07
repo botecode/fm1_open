@@ -111,3 +111,24 @@ console.log(`PASS: trig keys (place/hold/remove), K3 PROB ${prob}->edited, bar C
   assert.ok(!on(D, 0), "808: short press removes it");
   console.log("PASS: 808 trig keys");
 }
+
+// C#5 REPEAT (length +16, copying the pattern), D#5 / F#5 COPY / PASTE TIMBRE (replace the old ACTIONS menu).
+{
+  const REPEAT = 20, TCOPY = 22, TPASTE = 25, SCL = 3;
+  const length = (t) => state()[209 + t];
+  turn(ENC.SELECT, 1 - state()[0]); tap(BTN.SEQ);
+  press(BTN.HOME); key(KEY.CLEAR); release(BTN.HOME);
+  while (length(1) !== 16) tap(SCL);
+  key(KEY.STEP1);
+  key(REPEAT);
+  assert.equal(length(1), 32, "REPEAT: 16 -> 32 steps");
+  assert.ok(on(1, 0) && on(1, 16), "REPEAT copies bar 1 into bar 2");
+  turn(ENC.K1, -9);
+  const cutoff = knobs()[0].value;
+  key(TCOPY);
+  turn(ENC.SELECT, 6 - state()[0]); tap(BTN.SEQ); // track 7, also a 303
+  assert.notEqual(knobs()[0].value, cutoff, "track 7 starts with a different cutoff");
+  key(TPASTE);
+  assert.equal(knobs()[0].value, cutoff, "PASTE TIMBRE copies the 303 sound from track 2");
+  console.log(`PASS: REPEAT 16->32, TIMBRE copy/paste (Cutoff ${cutoff})`);
+}
