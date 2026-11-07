@@ -247,6 +247,15 @@ static uint16_t button_led_cache;
 static struct groove_view frame_views[GROOVE_TRACKS];
 static uint8_t frame_step_notes[16], frame_effects[4];
 static uint8_t frame_patch[156];
+/* fmtakt: home-page knobs (K1/K2 tone macro, K3/K4 sends) and page-button peeking. */
+static uint8_t frame_sends[2];
+static unsigned frame_macro[2];
+static unsigned peek_button = 14, peek_return, peek_used;
+static unsigned home_down, home_used; /* fmtakt: HOME acts on release unless used as FUNC. */
+static char length_notice[24];
+/* fmtakt: Elektron-style trig keys on SEQ 1/8. Press places a trig; holding it
+ * lets K1-K4 edit VELOCITY/GATE/PROB/CHORD; a short press on a trig removes it. */
+static unsigned held_step = 255U, held_key, held_used, held_placed;
 static struct groove_fm_controls frame_controls;
 static struct fm1_ble_device frame_devices[FM1_BLE_MAX_DEVICES];
 static uint32_t frame_time;
@@ -575,10 +584,10 @@ static __attribute__((noinline)) void overview(const struct groove_view v[8])
         }
     }
 }
-static void step_knob(unsigned col, unsigned bank)
+static void step_knob(unsigned col, unsigned setting)
 {
     static const char *const labels[] = {"VELOCITY", "GATE", "PROB", "CHORD", "TIE", "LOCK", "VALUE", "NOTE"};
-    unsigned setting = bank * 4 + col, v = groove_step_setting(track, cursor, setting);
+    unsigned v = groove_step_setting(track, cursor, setting);
     char value[12];
     if (setting == 1) { decimal(value, v ? v == 15 ? 100 : (v * 100 + 8) / 16 : 50, 1); strcat(value, "%"); }
     else if (setting == 2) { decimal(value, v ? (v * 100 + 4) / 8 : 100, 1); strcat(value, "%"); }
@@ -832,6 +841,24 @@ static __attribute__((noinline)) void track_lfo_draw(void)
     }
     text(8, 231, "LFO BACK  HOME TRACKS", 1, DIM, BACK);
 }
+/* fmtakt: OVERVIEW and SEQ 1/8 are the "home" pages: K1-K4 = tone, tone, delay, reverb. */
+static unsigned home_view(unsigned shown) { return shown == OVERVIEW || (shown == STEPS && !seq_page); }
+static unsigned home_part(void) { return groove_pad_count(track) != 0 ? drum : 0; }
+/* Each engine's nearest filter-like controls, by parameter name. 255 = none;
+ * 256 + n = DX7 patch parameter n (the DX7 has no filter, FEEDBACK adds edge). */
+static unsigned home_macro(unsigned slot)
+{
+    static const char *const names[2][5] = {{"Cutoff", "BRIGHT", "Vel LPF", "Tone", "NOISE"},
+                                            {"Reso", "DECAY", "Decay", "Length", "RELEASE"}};
+    if (groove_source_type(track) == GROOVE_DX7) return slot ? 255U : 256U + 135U;
+    unsigned part = home_part(), count = groove_tone_count(track, part);
+    for (unsigned n = 0; n < 5; ++n)
+        for (unsigned i = 0; i < count; ++i) {
+            const fm1_param_t *p = groove_tone_parameter(track, part, i);
+            if (p && p->name && !strcmp(p->name, names[slot][n])) return i;
+        }
+    return 255U;
+}
 static void tone_label(unsigned parameter, unsigned value, const fm1_param_t *p, char out[12])
 {
     unsigned type = groove_source_type(track);
@@ -844,6 +871,70 @@ static void tone_label(unsigned parameter, unsigned value, const fm1_param_t *p,
                                   ? 24
                                   : 0),
                 1);
+}
+/* fmtakt step 5 (p-locks): hold a step + K1/K2 locks that tone macro on the step.
+ * The engine keeps one locked parameter per step and 16 locked steps per project. */
+static unsigned held_setting(unsigned col) { return col == 2 ? 0U : groove_pad_count(track) ? 2U : 1U; }
+static unsigned macro_lock(unsigned slot, unsigned *limit) /* 255 = not lockable */
+{
+    unsigned m = home_macro(slot), type = groove_source_type(track), lock = 255U;
+    *limit = 0;
+    if (m == 256U + 135U) { lock = 135U; *limit = 7U; } /* DX7 FEEDBACK */
+    else if (m < 255U && type != GROOVE_808 && type != GROOVE_DX7) {
+        const fm1_param_t *p = groove_tone_parameter(track, home_part(), m);
+        lock = type == GROOVE_SAMPLE ? (m < 6U ? home_part() * 6U + m : 255U) : m;
+        if (p) *limit = p->max;
+    }
+    return lock < groove_lock_parameter_count(track) && *limit ? lock : 255U;
+}
+static unsigned lock_count(void)
+{
+    unsigned n = 0;
+    for (unsigned t = 0; t < 8; ++t)
+        for (unsigned s = 0; s < 64; ++s) n += groove_step_setting(t, s, 5) != 0;
+    return n;
+}
+static void lock_notice(const char *prefix, uint32_t now)
+{
+    unsigned n = lock_count();
+    strcpy(length_notice, prefix);
+    strcat(length_notice, " LOCKS ");
+    char count[4]; decimal(count, n, 1); strcat(length_notice, count); strcat(length_notice, "/16");
+    notice = length_notice; notice_until = now + 1500U;
+}
+static void macro_lock_edit(unsigned slot, unsigned step, int delta, uint32_t now)
+{
+    unsigned limit, lock = macro_lock(slot, &limit), have = groove_step_setting(track, step, 5);
+    if (lock == 255U) { notice = groove_source_type(track) == GROOVE_808 ? "808 LOCKS: VOLUME ONLY" : "THIS KNOB CAN'T LOCK"; notice_until = now + 1500U; return; }
+    unsigned base;
+    if (have == lock + 1U) base = (groove_step_setting(track, step, 6) * limit + 63U) / 127U;
+    else {
+        if (!have && lock_count() >= GROOVE_LOCKS) { notice = "LOCKS FULL 16/16"; notice_until = now + 2000U; return; }
+        if (lock == 135U) { struct groove_fm_controls c; uint8_t patch[156]; groove_fm_copy(track, patch, &c); base = patch[135]; }
+        else { uint8_t tone[GROOVE_TONE_PARAMS]; groove_tone_copy(track, home_part(), tone); base = tone[home_macro(slot)]; }
+        if (groove_step_setting_edit(track, step, 5, (int)(lock + 1U) - (int)have)) { notice = "LOCKS FULL 16/16"; notice_until = now + 2000U; return; }
+    }
+    unsigned target = (unsigned)clamp((int)base + delta, 0, (int)limit), value = 0;
+    while (value < 127U && (value * limit + 63U) / 127U < target) ++value;
+    int change = (int)value - (int)groove_step_setting(track, step, 6);
+    if (change) groove_step_setting_edit(track, step, 6, change);
+    lock_notice(have && have != lock + 1U ? "REPLACED" : "LOCKED", now);
+}
+static void lock_knob(unsigned col)
+{
+    unsigned limit, lock = macro_lock(col, &limit), m = home_macro(col);
+    const fm1_param_t *p = m < 255U ? groove_tone_parameter(track, home_part(), m) : 0;
+    const char *label = m >= 256U ? "FDBACK" : p ? p->name : "";
+    char value[12], shown[12];
+    unsigned locked = lock < 255U && groove_step_setting(track, cursor, 5) == lock + 1U;
+    unsigned raw = locked ? (groove_step_setting(track, cursor, 6) * limit + 63U) / 127U
+                          : m >= 256U ? frame_patch[m - 256U] : m < 255U ? frame_patch[m] : 0;
+    if (lock == 255U) strcpy(shown, m < 255U || m >= 256U ? "NO LOCK" : "");
+    else if (p) tone_label(m, raw, p, shown);
+    else decimal(shown, raw, 1);
+    strcpy(value, locked ? "L " : "");
+    strncat(value, shown, sizeof value - 1 - strlen(value));
+    knob(col, label, value, locked ? ACCENT : colors[col]);
 }
 static __attribute__((noinline)) void tone_draw(const uint8_t values[GROOVE_TONE_PARAMS])
 {
@@ -1222,8 +1313,9 @@ static void leds(const struct groove_view *v, unsigned visible)
             fm1_led_set(key + 14, (bits >> key) & 1U);
     led_cache = bits;
     unsigned step_pages = visible == STEPS || visible == ACTIONS;
-    bits = ((step_pages ? first > 0 : octave < 0) << OCT_DOWN)
-        | ((step_pages ? first + 16 < v->sequence_length : octave > 0) << OCT_UP)
+    unsigned pattern_view = visible == OVERVIEW || visible == STEPS;
+    bits = ((pattern_view ? !preset_loaded || preset_current_slot > 0 : step_pages ? first > 0 : octave < 0) << OCT_DOWN)
+        | ((pattern_view ? !preset_loaded || preset_current_slot + 1U < GROOVE_PROJECT_SLOTS : step_pages ? first + 16 < v->sequence_length : octave > 0) << OCT_UP)
         | ((visible == OVERVIEW) << HOME) | ((visible == EFFECTS) << FX)
         | ((groove_arp_enabled(track) != 0) << ARP)
         | ((visible == FM_EDIT && (fm_group == 4 || fm_group == 5)) << SCL)
@@ -1290,7 +1382,7 @@ static __attribute__((noinline)) void edit_page_draw(unsigned visible)
             text(10, y + 5, actions[at], 1, at == action ? ACCENT : DIM, bg);
         }
         text(8, 213, notice ? notice : "SELECT ACTION  SAVE EXECUTE", 1, TEXT, BACK);
-        text(8, 231, action_confirm ? "SAVE CONFIRM   HOME CANCEL" : "PRESETS STEP  OCT PAGE  SAVE DO", 1, DIM, BACK);
+        text(8, 231, action_confirm ? "SAVE CONFIRM   HOME CANCEL" : "PRESETS STEP  ALGO BAR  SAVE DO", 1, DIM, BACK);
     } else if (visible == ARP_EDIT) {
         text(8, 40, "ARPEGGIATOR", 2, ACCENT, BACK);
         text(184, 40, "T", 2, colors[track], BACK);
@@ -1427,7 +1519,7 @@ static void draw_page_body(const struct fm1_ble_status *ble)
             cache->seq_cache = strip;
             paint_fill(0, 184, 240, 11, BACK);
             text(8, 186, parameter ? groove_lock_parameter_name(track, parameter - 1) : seq_pages[seq_page], 1, ACCENT, BACK);
-            if (!parameter) text(174, 186, "ALGO PAGE", 1, DIM, BACK);
+            if (!parameter) text(150, 186, "HOME+OCT PAGE", 1, DIM, BACK);
         }
     }
     for (unsigned col = 0; col < 4; ++col) {
@@ -1435,7 +1527,7 @@ static void draw_page_body(const struct fm1_ble_status *ble)
         const char *label;
         uint16_t color = colors[col];
         if (visible == STEPS && (seq_page == 1 || seq_page == 3)) {
-            step_knob(col, seq_page == 3); continue;
+            step_knob(col, (seq_page == 3) * 4U + col); continue;
         } else if (visible == STEPS && seq_page == 2) {
             static const char *const labels[] = {"SWING", "CLICK", "COUNT IN", "LENGTH"};
             static const char *const clicks[] = {"OFF", "REC", "ON"};
@@ -1521,6 +1613,23 @@ static void draw_page_body(const struct fm1_ble_status *ble)
                                             : parameter == 144 ? -24
                                                                : 0),
                         1);
+        } else if (visible == STEPS && held_step < 64U) {
+            if (home_down || col >= 2) step_knob(col, home_down ? col : held_setting(col));
+            else lock_knob(col);
+            continue;
+        } else if (home_view(visible)) {
+            if (col >= 2) {
+                label = col == 2 ? "DLY SEND" : "REV SEND";
+                decimal(value, (frame_sends[col == 2] * 100U + 7U) / 15U, 1); strcat(value, "%");
+            } else if (frame_macro[col] >= 256U) {
+                label = "FDBACK"; decimal(value, frame_patch[frame_macro[col] - 256U], 1);
+            } else {
+                const fm1_param_t *p = frame_macro[col] < 255U
+                    ? groove_tone_parameter(track, home_part(), frame_macro[col]) : 0;
+                label = p ? p->name : "";
+                if (p) tone_label(frame_macro[col], frame_patch[frame_macro[col]], p, value);
+                else value[0] = 0;
+            }
         } else {
             static const char *const labels[4] = {"LEVEL", "STEP", "NOTE", "BPM"};
             label = labels[col];
@@ -1558,7 +1667,7 @@ static void draw_page_body(const struct fm1_ble_status *ble)
                        : visible == OVERVIEW && (previous_buttons & BUTTON(HOME))
                            ? "PRESETS SOURCE  EDIT PARAMETERS"
                        : visible == OVERVIEW ? "PRESETS PRESET  ALGO ENGINE"
-                       : visible == STEPS    ? "PRESETS STEP  OCT PAGE  HOLD SEQ MORE"
+                       : visible == STEPS    ? (groove_pad_count(track) && !seq_page ? "PRESETS PAD  ALGO BAR  OCT PTN" : "PRESETS STEP  ALGO BAR  OCT PTN")
                        : visible == MIX      ? "KEYS MUTE/SOLO  GLO / HOME BACK"
                        : visible == FM_EDIT  ? "BLACK OP  SELECT PAGE  EDIT BACK"
                        : visible == FM_ENV && v->type != GROOVE_DX7 ? "ENV BACK  SELECT TRACK"
@@ -1634,7 +1743,12 @@ static void draw(const struct fm1_ble_status *ble)
     }
     memset(frame_patch, 0, sizeof frame_patch);
     memset(&frame_controls, 0, sizeof frame_controls);
-    if (visible == TONE_EDIT || (visible == FM_ENV && groove_source_type(track) != GROOVE_DX7))
+    if (home_view(visible)) {
+        groove_sends_get(track, frame_sends);
+        frame_macro[0] = home_macro(0); frame_macro[1] = home_macro(1);
+        if (groove_source_type(track) == GROOVE_DX7) groove_fm_copy(track, frame_patch, &frame_controls);
+        else groove_tone_copy(track, home_part(), frame_patch);
+    } else if (visible == TONE_EDIT || (visible == FM_ENV && groove_source_type(track) != GROOVE_DX7))
         groove_tone_copy(track, tone_part(), frame_patch);
     else if (visible == FM_LFO && groove_source_type(track) != GROOVE_DX7)
         groove_lfo_copy(track, frame_patch);
@@ -1841,6 +1955,31 @@ static int apply_controls(const struct fm1_controls *controls, uint32_t now,
                           const struct fm1_ble_status *ble)
 {
     uint32_t pressed = controls->buttons & ~previous_buttons;
+    /* fmtakt: HOME is FUNC. Navigation happens on release, and only if HOME
+     * was not combined with another button, key or encoder while held. */
+    if (pressed & BUTTON(HOME)) { home_down = 1; home_used = 0; }
+    else if (home_down && (controls->buttons & BUTTON(HOME)) &&
+             ((pressed & ~BUTTON(HOME)) || encoder_active(controls->encoders) || (controls->keys & ~previous_keys)))
+        home_used = 1;
+    pressed &= ~BUTTON(HOME);
+    if (home_down && !(controls->buttons & BUTTON(HOME))) {
+        if (!home_used) pressed |= BUTTON(HOME);
+        home_down = 0;
+    }
+    /* fmtakt: a page button held while K1-K4 turn is a "peek": release returns home. */
+    if (peek_button < 14) {
+        if (controls->buttons & BUTTON(peek_button)) {
+            if (controls->encoders[2] || controls->encoders[3] || controls->encoders[4] || controls->encoders[5]) {
+                peek_used = 1;
+                if (peek_button == EDIT) edit_down = 0; /* no long-press jump while peeking */
+            }
+        } else {
+            if (peek_used && !home_view(page)) {
+                page = peek_return; seq_page = 0; cache->shown_page = ~0U;
+            }
+            peek_button = 14;
+        }
+    }
     uint32_t old_keys = previous_keys, key_down = controls->keys & ~old_keys;
     unsigned play_handled = 0;
     previous_buttons = controls->buttons;
@@ -1967,6 +2106,23 @@ static int apply_controls(const struct fm1_controls *controls, uint32_t now,
         page = NAME; name_cursor = 0;
         goto controls_done;
     }
+    if ((pressed & BUTTON(SCL)) && (page == OVERVIEW || page == STEPS)) {
+        /* fmtakt: SCL = track length 16 -> 32 -> 48 -> 64 -> 16 (Syntakt SCALE). */
+        unsigned length = groove_sequence_length(track);
+        groove_sequence_length_set(track, length >= 64U ? 16U : length + 16U);
+        unsigned now_length = groove_sequence_length(track);
+        cursor %= now_length;
+        strcpy(length_notice, "TRACK ");
+        decimal(length_notice + 6, track + 1U, 1);
+        strcat(length_notice, now_length == length ? " LENGTH LOCKED" : " LENGTH ");
+        if (now_length != length) decimal(length_notice + strlen(length_notice), now_length, 1);
+        notice = length_notice; notice_until = now + 1500U;
+        goto controls_done;
+    }
+    if ((pressed & (BUTTON(FX) | BUTTON(ENV) | BUTTON(LFO) | BUTTON(EDIT))) && home_view(page)) {
+        peek_button = pressed & BUTTON(FX) ? FX : pressed & BUTTON(ENV) ? ENV : pressed & BUTTON(LFO) ? LFO : EDIT;
+        peek_return = page; peek_used = 0;
+    }
     if (pressed & (BUTTON(HOME) | BUTTON(SEQ) | BUTTON(FX) | BUTTON(SCL) |
                    BUTTON(EDIT) | BUTTON(ENV) | BUTTON(LFO))) {
         glo_down = glo_used = 0;
@@ -2027,8 +2183,26 @@ static int apply_controls(const struct fm1_controls *controls, uint32_t now,
         }
         goto controls_done;
     }
-    if (page != STEPS && page != ACTIONS)
-        octave = clamp(octave + !!(pressed & BUTTON(OCT_UP)) - !!(pressed & BUTTON(OCT_DOWN)), -2, 2);
+    {
+        /* fmtakt: on OVERVIEW and SEQ, OCT-/+ = previous/next pattern (project slot),
+         * like the stock OVERVIEW+PRESETS shortcut. HOME+OCT = octave / SEQ settings page. */
+        int oct_press = !!(pressed & BUTTON(OCT_UP)) - !!(pressed & BUTTON(OCT_DOWN));
+        unsigned func = (controls->buttons & BUTTON(HOME)) != 0;
+        if (oct_press && !func && (page == OVERVIEW || page == STEPS) && !glo_down) {
+            int current = preset_loaded ? (int)preset_current_slot : oct_press > 0 ? -1 : GROOVE_PROJECT_SLOTS;
+            unsigned slot = (unsigned)clamp(current + oct_press, 0, GROOVE_PROJECT_SLOTS - 1);
+            if (!preset_loaded || slot != preset_current_slot) {
+                unsigned back = page;
+                struct groove_view view = {0}; groove_get_view(track, cursor, &view);
+                preset_slot = slot; preset_bank = preset_current_bank; preset_refresh();
+                preset_load(view.playing, now);
+                if (back == STEPS && page == OVERVIEW) { page = STEPS; seq_page = 0; }
+            }
+            goto controls_done;
+        }
+        if (page != STEPS && page != ACTIONS && (func || (page != OVERVIEW)))
+            octave = clamp(octave + oct_press, -2, 2);
+    }
     if ((pressed & BUTTON(SAVE)) && page != PROJECT && page != BLE &&
         page != SOURCE && page != ACTIONS) {
         project_return = page; page = PROJECT; project_result = 0;
@@ -2103,7 +2277,7 @@ static int apply_controls(const struct fm1_controls *controls, uint32_t now,
     }
     if (page == ACTIONS) {
         int move = controls->encoders[6] + controls->encoders[3];
-        int paging = !!(pressed & BUTTON(OCT_UP)) - !!(pressed & BUTTON(OCT_DOWN));
+        int paging = controls->encoders[1] + !!(pressed & BUTTON(OCT_UP)) - !!(pressed & BUTTON(OCT_DOWN));
         if (move || paging) {
             cursor = (unsigned)clamp((int)cursor + move + paging * 16, 0,
                                      (int)groove_sequence_length(track) - 1);
@@ -2250,14 +2424,14 @@ static int apply_controls(const struct fm1_controls *controls, uint32_t now,
                 (page == TONE_EDIT && !advanced_edit);
             select_track(tracks ? controls->encoders[0] : 0);
             {
-                if (page == OVERVIEW && (controls->encoders[1] || controls->encoders[3])) {
+                if (page == OVERVIEW && controls->encoders[1]) {
                     /* Type and timbre are separate controls. Finish old note-offs
                      * before replacing the instance; held keys wait for release. */
                     blocked_keys |= controls->keys;
                     if (!release_keys())
                         return 0;
                     int type = (int)groove_source_type(track);
-                    type = (type + (controls->encoders[1] + controls->encoders[3]) % GROOVE_SOURCES + GROOVE_SOURCES) %
+                    type = (type + controls->encoders[1] % GROOVE_SOURCES + GROOVE_SOURCES) %
                            GROOVE_SOURCES;
                     source_preview = (unsigned)type;
                     source_result = 0;
@@ -2266,13 +2440,15 @@ static int apply_controls(const struct fm1_controls *controls, uint32_t now,
                     operator_held = operator_long = 0;
                     goto controls_done;
                 }
-                int oct_delta = (int)((pressed >> OCT_UP) & 1U) - (int)((pressed >> OCT_DOWN) & 1U);
+                int oct_delta = (controls->buttons & BUTTON(HOME)) ? (int)((pressed >> OCT_UP) & 1U) - (int)((pressed >> OCT_DOWN) & 1U) : 0;
                 if (page == STEPS) {
-                    unsigned next = (unsigned)clamp((int)seq_page + controls->encoders[1], 0, 7);
+                    /* fmtakt: ALGORITHM scrolls bars (16-step pages); OCT-/+ pick the settings page. */
+                    int bar_delta = controls->encoders[1];
+                    unsigned next = (unsigned)clamp((int)seq_page + oct_delta, 0, 7);
                     struct groove_view v = {0}; groove_get_view(track, cursor, &v);
-                    int move = controls->encoders[6] + (!next ? controls->encoders[3] : 0);
-                    if (next != seq_page || move || oct_delta) {
-                        move_step(&v, move, oct_delta);
+                    int move = groove_pad_count(track) && !next ? 0 : controls->encoders[6];
+                    if (next != seq_page || move || bar_delta) {
+                        move_step(&v, move, bar_delta);
                         if (move) writing = 0;
                     }
                     if (next != seq_page) { seq_page = next; cache->shown_page = ~0U; }
@@ -2429,6 +2605,29 @@ static int apply_controls(const struct fm1_controls *controls, uint32_t now,
                                 groove_fm_edit(track, fm_parameter(col),
                                                fm_encoder_delta(2 + col, controls->encoders[2 + col]));
                         }
+                } else if (home_view(page) && page == STEPS && held_step < 64U) {
+                    if (controls->encoders[2] || controls->encoders[3] || controls->encoders[4] || controls->encoders[5]) {
+                        cursor = held_step; step_follow = 0; held_used = 1;
+                        if (controls->buttons & BUTTON(HOME)) step_adjust(0, controls->encoders, now);
+                        else for (unsigned col = 0; col < 4; ++col) if (controls->encoders[2 + col]) {
+                            if (col < 2) macro_lock_edit(col, held_step, fm_encoder_delta(2 + col, controls->encoders[2 + col]), now);
+                            else if (groove_step_setting_edit(track, held_step, held_setting(col), controls->encoders[2 + col])) {
+                                notice = "UNAVAILABLE HERE"; notice_until = now + 1500U;
+                            }
+                        }
+                    }
+                } else if (home_view(page)) {
+                    for (unsigned slot = 0; slot < 2; ++slot) if (controls->encoders[2 + slot]) {
+                        unsigned m = home_macro(slot);
+                        if (m >= 256U) groove_fm_edit(track, m - 256U, fm_encoder_delta(2 + slot, controls->encoders[2 + slot]));
+                        else if (m < 255U) groove_tone_edit(track, home_part(), m, fm_encoder_delta(2 + slot, controls->encoders[2 + slot]));
+                    }
+                    if (controls->encoders[4]) groove_sends_edit(track, 1, controls->encoders[4]);
+                    if (controls->encoders[5]) groove_sends_edit(track, 0, controls->encoders[5]);
+                    if (page == STEPS && groove_pad_count(track) && controls->encoders[6]) {
+                        drum = (unsigned)clamp((int)drum + controls->encoders[6], 0, (int)groove_pad_count(track) - 1);
+                        selected_note = groove_pad_note(track, drum);
+                    }
                 } else if (page != STEPS || !seq_page) {
                     if (page == OVERVIEW) {
                         if (controls->encoders[4]) {
@@ -2530,12 +2729,80 @@ controls_done:
         struct groove_view view = {0};
         groove_get_view(track, cursor, &view);
         unsigned first = step_first(&view);
+        if (!seq_page) {
+            if (held_step < 64U && !(controls->keys & (1U << held_key))) {
+                if (!held_used && !held_placed) {
+                    toggle_step(held_step);
+                    struct groove_view cell = {0}; groove_get_view(track, held_step, &cell);
+                    unsigned have = groove_step_setting(track, held_step, 5);
+                    if (have && !cell.step.velocity && !(groove_pad_count(track) && cell.step.drums))
+                        groove_step_setting_edit(track, held_step, 5, -(int)have);
+                }
+                held_step = 255U;
+            }
+            for (unsigned i = 0; i < 16 && held_step >= 64U; ++i)
+                if ((key_down & keys) & (1U << white_keys[i])) {
+                    struct groove_view cell = {0};
+                    groove_get_view(track, first + i, &cell);
+                    unsigned on = groove_pad_count(track) ? (cell.step.drums & (1U << drum)) != 0 : cell.step.velocity != 0;
+                    held_placed = !on;
+                    if (!on) toggle_step(first + i);
+                    held_step = first + i; held_key = white_keys[i]; held_used = 0;
+                    cursor = held_step; step_follow = 0;
+                }
+            /* Black keys: F#3 COPY, G#3 PASTE, A#3 CLEAR (held step / this bar / HOME = track),
+             * C#4 UNDO, D#4 TIE, F#4 NOTE-, G#4 NOTE+, A#4 UNLOCK (held step). */
+            static const uint8_t black[8] = {1, 3, 5, 8, 10, 13, 15, 17};
+            for (unsigned b = 0; b < 8; ++b) if ((key_down & keys) & (1U << black[b])) {
+                unsigned scope = (controls->buttons & BUTTON(HOME)) ? 2U : held_step < 64U ? 0U : 1U;
+                unsigned at = held_step < 64U ? held_step : first;
+                static const char *const scopes[3] = {"STEP", "BAR", "TRACK"};
+                int r = 0; const char *done = 0;
+                if (b == 0) { r = groove_edit_copy(track, at, scope); done = "COPIED"; }
+                else if (b == 1) {
+                    unsigned count = groove_edit_clipboard_count();
+                    unsigned from = count == 1U ? 0U : count == 16U ? 1U : count == 64U ? 2U : 3U;
+                    r = from < 3U ? groove_edit_paste(track, from == 0U ? at : from == 1U ? first : 0U, from) : -3;
+                    if (from < 3U) scope = from;
+                    done = "PASTED";
+                } else if (b == 2) { r = groove_edit_clear(track, at, scope); done = "CLEARED"; }
+                else if (b == 3) { r = groove_edit_undo(); done = "UNDO"; scope = 3U; }
+                else if (b == 7) {
+                    unsigned have = held_step < 64U ? groove_step_setting(track, at, 5) : 0;
+                    r = held_step >= 64U ? -4 : !have ? -5 : groove_step_setting_edit(track, at, 5, -(int)have);
+                    done = "UNLOCKED"; scope = 3U;
+                }
+                else if (groove_pad_count(track)) { r = -1; }
+                else if (b == 4) {
+                    r = groove_step_setting_edit(track, at, 4, groove_step_setting(track, at, 4) ? -1 : 1);
+                    done = groove_step_setting(track, at, 4) ? "TIE ON" : "TIE OFF"; scope = 3U;
+                } else {
+                    struct groove_view cell = {0}; groove_get_view(track, at, &cell);
+                    if (!cell.step.velocity) r = -1;
+                    else {
+                        groove_sequence_edit(track, at, (unsigned)clamp((int)cell.step.note + (b == 6 ? 1 : -1), 0, 127), cell.step.velocity);
+                        selected_note = cell.step.note + (b == 6 ? 1U : 0U) - (b == 5 ? 1U : 0U);
+                        done = b == 6 ? "NOTE +1" : "NOTE -1"; scope = 3U;
+                    }
+                }
+                if (held_step < 64U) held_used = 1;
+                if (r || !done) notice = r == -3 ? "COPY SOMETHING FIRST" : r == -4 ? "HOLD A STEP TO UNLOCK"
+                                       : r == -5 ? "NO LOCK ON THIS STEP" : "UNAVAILABLE HERE";
+                else {
+                    strcpy(length_notice, scope < 3U ? scopes[scope] : done);
+                    if (scope < 3U) { strcat(length_notice, " "); strcat(length_notice, done); }
+                    notice = length_notice;
+                }
+                notice_until = now + 1500U;
+            }
+        } else
         for (unsigned i = 0; i < 16; ++i)
             if ((key_down & keys) & (1U << white_keys[i])) {
                 if (seq_page == 1 || seq_page == 3) { cursor = first + i; step_follow = 0; }
                 else toggle_step(first + i);
             }
     }
+    if (page != STEPS || seq_page || writing) held_step = 255U;
     for (unsigned key = 0; key < 27; ++key) {
         unsigned note = groove_key_note(track, key, octave);
         if (key_note[key] != 0xff &&
