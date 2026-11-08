@@ -89,14 +89,17 @@ Draft v1 approved (2026-11-07): black keys = functions, page buttons = hold (mom
   - SCL on OVERVIEW/SEQ = track length 16 → 32 → 48 → 64 → 16. On FM pages SCL keeps its stock function (DX7 scaling).
   - **Changed from the plan:** ARP stays the arpeggiator. Mute mode already exists on GLO (stock MIX page: white keys 1–8 mute, 9–16 solo; hold GLO + key = quick mute).
 - **Step 4 – trig keys + black keys** (`tests/trig-keys.test.mjs`), on SEQ 1/8:
-  - White key press = place trig at once. Hold + K1–K4: see step 5 (HOME + hold = VELOCITY / GATE / PROB / CHORD). Short press on an existing trig = remove (on release). Changed from stock, where every press toggled.
-  - Black keys: F#3 COPY · G#3 PASTE · A#3 CLEAR (held step, else current bar; with HOME = whole track) · C#4 UNDO · D#4 TIE · F#4 NOTE−1 · G#4 NOTE+1 (held step). PASTE pastes whatever size was copied.
-  - Free: C#5, D#5, F#5 (A#4 = UNLOCK since step 5).
+  - White key press = place trig at once. Hold + K1–K4 = VELOCITY / GATE / PROB / CHORD of that step. Short press on an existing trig = remove (on release). Changed from stock, where every press toggled.
+  - Black keys: F#3 COPY · G#3 PASTE · A#3 CLEAR (held step, else current bar; with HOME = whole track) · C#4 UNDO · D#4 TIE · F#4 NOTE−1 · G#4 NOTE+1 (held step) · C#5 REPEAT (length +16, pattern copied) · D#5 COPY TIMBRE · F#5 PASTE TIMBRE. PASTE pastes whatever size was copied.
+  - Free: A#4.
   - **Not possible on the device:** trig conditions, retrig and micro timing. On hardware the sequencer runs in the closed `libfm1_engine.a`, and steps have no fields for them. ALT tuning has no public API in the SDK headers.
-- **Step 5 – parameter locks** (`tests/plocks.test.mjs`), on SEQ 1/8:
-  - Hold step + K1/K2 = lock that tone macro on the step (value shows `L 24`). K3 = VELOCITY, K4 = GATE (PROB on pad tracks).
-  - HOME + hold step + K1–K4 = VELOCITY / GATE / PROB / CHORD (the old step-4 layout).
-  - A#4 = UNLOCK the held step. Removing a trig (short press) also frees its lock; CLEAR frees locks too.
-  - Lockable: 303 Cutoff/Reso, PSG NOISE/RELEASE, Pluck BRIGHT/DECAY, Sampler Vel LPF/Length (per pad), DX7 FEEDBACK. **808: none** (engine locks only VOLUME there).
-  - **Engine limits:** one locked parameter per step (locking K2 replaces a K1 lock, notice `REPLACED`), 16 locked steps per project shared by all tracks (notice `LOCKS n/16`, then `LOCKS FULL 16/16`). Sends cannot be locked.
-  - Locks on other pages (hold step + EDIT/ENV page knobs) not done yet; SEQ 4/8 LOCKS still reaches every lockable parameter.
+- **Step 5 – parameter locks: removed for flash space (2026-11-08).** Hold step + K1/K2 locking worked in the simulator, but the firmware did not fit. Locks remain on the stock SEQ 4/8 LOCKS page.
+
+## Flash budget (device build)
+The FM1 app image limit is **453,921 bytes**. Stock Open V14 (`4c7496d`) uses 453,576 (345 B free). To fit fmtakt:
+- Removed the stock **ACTIONS menu** (hold SEQ / SEQ+EDIT). Copy/paste/clear/undo are on black keys; REPEAT and timbre copy/paste moved to C#5/D#5/F#5; patch name, Bluetooth and stop-all keep their button shortcuts.
+- Removed stock OVERVIEW/SEQ knob code made unreachable by the home pages.
+- Dropped the hold-step p-lock knobs (step 5).
+- `__attribute__((minsize))` has no effect with this toolchain (LTO).
+
+Result: **453,640 bytes, 281 B free.** Any new feature must remove something of similar size.

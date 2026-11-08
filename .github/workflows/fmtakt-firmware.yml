@@ -51,6 +51,26 @@ jobs:
         shell: cmd  # build.bat starts Windows PowerShell 5.1; from pwsh it inherits a broken PSModulePath
         run: .\build.bat --package
 
+      - name: Verify the package is the fmtakt firmware
+        shell: pwsh
+        run: |
+          $report = Get-Content build\dx7\web-package-report.json -Raw | ConvertFrom-Json
+          if (!$report.integrated) { throw 'workbench page was not integrated' }
+          if ((Get-Content build\official-web\FM1-Official-Open-Source.html -Raw) -match 'Build incomplete') { throw 'placeholder page' }
+          $fw = (Get-FileHash build\dx7\generated\FM1_OFFICIAL_OPEN.fwsc -Algorithm SHA256).Hash.ToLower()
+          if ($fw -ne $report.firmware_sha256) { throw "firmware hash mismatch: $fw vs $($report.firmware_sha256)" }
+          "firmware sha256 $fw  web sha256 $($report.web_sha256)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fmtakt-firmware-${{ github.sha }}
+          path: |
+            build/official-web/FM1-Official-Open-Source.html
+            build/dx7/generated/FM1_OFFICIAL_OPEN.fwsc
+            build/dx7/firmware-report.json
+            build/dx7/web-package-report.json
+
+
       - name: Size report (largest symbols, mod vs stock)
         if: always()
         shell: pwsh
@@ -80,12 +100,3 @@ jobs:
             fmtakt-sdk.elf
             stock-sdk.elf
             build/dx7/firmware-report.json
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: fmtakt-firmware-${{ github.sha }}
-          path: |
-            build/official-web/FM1-Official-Open-Source.html
-            build/dx7/generated/FM1_OFFICIAL_OPEN.fwsc
-            build/dx7/firmware-report.json
-            build/dx7/web-package-report.json
